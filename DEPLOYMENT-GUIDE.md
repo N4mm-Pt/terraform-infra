@@ -158,6 +158,22 @@ terraform init
 terraform apply -auto-approve
 ```
 
+#### Alternative: Manual Secret Creation (if External Secrets Operator fails)
+If you encounter issues with External Secrets Operator (e.g., kubectl authentication errors), you can create the secret manually:
+
+```powershell
+# Get the Ably API key from AWS Secrets Manager
+$ABLY_KEY = aws secretsmanager get-secret-value --secret-id ably-api-key --region us-east-1 --query SecretString --output text | ConvertFrom-Json | Select-Object -ExpandProperty 'Ably__ApiKey'
+
+# Create the secret manually in Kubernetes
+kubectl create secret generic ably-api-secret -n my-app --from-literal="Ably__ApiKey=$ABLY_KEY"
+
+# Verify the secret was created
+kubectl get secrets -n my-app
+```
+
+**Note:** If using manual secret creation, you can skip the External Secrets Operator deployment and proceed directly to Step 8.
+
 ### Step 8: Deploy Kubernetes Resources
 ```powershell
 # Navigate to k8s directory
@@ -177,6 +193,9 @@ kubectl apply -f backend-loadbalancer.yaml
 kubectl apply -f ably-backend.yaml
 kubectl apply -f nginx-proxy.yaml
 kubectl apply -f backend-ingress.yaml
+
+# Wait for LoadBalancer to be provisioned (this can take 2-5 minutes)
+kubectl get services -n my-app -w
 ```
 
 ### Step 9: Verify Backend Deployment
@@ -193,6 +212,12 @@ kubectl get secrets -n my-app
 
 # Get LoadBalancer URL
 kubectl get service ably-backend-lb -n my-app -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+
+# If LoadBalancer is still pending, wait and check again:
+kubectl get services -n my-app
+
+# Monitor LoadBalancer provisioning (press Ctrl+C to stop watching):
+kubectl get services -n my-app -w
 ```
 
 ### Step 10: Update CloudFront with LoadBalancer URL
@@ -233,6 +258,10 @@ npm install
 # Update environment configuration
 # Create or update .env file with CloudFront URL
 echo "VITE_API_BASE_URL=https://YOUR_CLOUDFRONT_DOMAIN/api" > .env
+
+# IMPORTANT: Make sure to include https:// protocol in the URL
+# Example: VITE_API_BASE_URL=https://di1pou4cueclj.cloudfront.net/api
+# NOT: VITE_API_BASE_URL=di1pou4cueclj.cloudfront.net/api
 
 # Build the application
 npm run build
@@ -324,6 +353,99 @@ kubectl logs -n my-app POD_NAME
 
 # Check secrets
 kubectl get secret -n my-app ably-api-secret -o yaml
+```
+
+#### CreateContainerConfigError Fix
+If pods show `CreateContainerConfigError` status, this usually means the secret is missing:
+
+```powershell
+# Check if the secret exists
+kubectl get secrets -n my-app
+
+# If secret is missing, create it manually:
+$ABLY_KEY = aws secretsmanager get-secret-value --secret-id ably-api-key --region us-east-1 --query SecretString --output text | ConvertFrom-Json | Select-Object -ExpandProperty 'Ably__ApiKey'
+kubectl create secret generic ably-api-secret -n my-app --from-literal="Ably__ApiKey=$ABLY_KEY"
+
+# Restart the deployment
+kubectl rollout restart deployment/ably-backend -n my-app
+```
+
+#### Port Mismatch Issues
+If your Docker container uses a different port than 8080, update the deployment:
+
+```powershell
+# Edit deployment.yaml to match your container port
+# For example, if using port 4444:
+# containerPort: 4444
+
+# Also update backend-service.yaml:
+# targetPort: 4444
+
+# Apply the changes
+kubectl apply -f deployment.yaml
+kubectl apply -f backend-service.yaml
+```
+
+#### LoadBalancer Pending Issues
+If your LoadBalancer service shows `<pending>` status:
+
+```powershell
+# Check LoadBalancer status
+kubectl get services -n my-app
+
+# LoadBalancer provisioning can take 2-5 minutes. Monitor with:
+kubectl get services -n my-app -w
+
+# Check AWS Load Balancer events
+kubectl describe service ably-backend-lb -n my-app
+
+# Verify your EKS cluster has the AWS Load Balancer Controller:
+kubectl get pods -n kube-system | Select-String -Pattern "aws-load-balancer"
+
+# If still pending after 10 minutes, check EKS node group capacity:
+kubectl get nodes
+kubectl describe nodes
+```
+
+#### Missing AWS Load Balancer Controller
+If no LoadBalancer appears in AWS Console and pods show no `aws-load-balancer-controller`, install it manually:
+
+```powershell
+# Download policy document
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+
+# Create IAM policy
+aws iam create-policy --policy-name AWSLoadBalancerControllerIAMPolicy --policy-document file://iam_policy.json
+
+# Create service account with IAM role
+eksctl create iamserviceaccount --cluster=ryan-cluster --namespace=kube-system --name=aws-load-balancer-controller --role-name AmazonEKSLoadBalancerControllerRole --attach-policy-arn=arn:aws:iam::YOUR_ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy --approve
+
+# Add Helm repository and install controller
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller -n kube-system --set clusterName=ryan-cluster --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller
+
+# Verify installation
+kubectl get deployment -n kube-system aws-load-balancer-controller
+
+# After installation, delete and recreate the LoadBalancer service:
+kubectl delete -f backend-loadbalancer.yaml
+kubectl apply -f backend-loadbalancer.yaml
+```
+
+**Alternative: Use NodePort instead of LoadBalancer**
+If you prefer to skip the Load Balancer Controller setup:
+
+```powershell
+# Change service type to NodePort in backend-loadbalancer.yaml
+# Replace "type: LoadBalancer" with "type: NodePort"
+# Then apply: kubectl apply -f backend-loadbalancer.yaml
+
+# Get node external IP and NodePort
+kubectl get nodes -o wide
+kubectl get service ably-backend-lb -n my-app
+
+# Access via: http://NODE_EXTERNAL_IP:NODEPORT
 ```
 
 ### CloudFront Issues

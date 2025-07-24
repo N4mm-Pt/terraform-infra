@@ -11,7 +11,7 @@ module "eks" {
   # Allow cluster endpoint access from anywhere (for initial setup)
   cluster_endpoint_public_access  = true
   cluster_endpoint_private_access = true
-  
+  enable_cluster_creator_admin_permissions = true
   # Enable cluster logging
   cluster_enabled_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
@@ -26,7 +26,6 @@ module "eks" {
       subnet_ids = var.private_subnet_ids != null ? var.private_subnet_ids : var.public_subnet_ids
     }
   }
-
   tags = {
     Environment = "prod"
   }
